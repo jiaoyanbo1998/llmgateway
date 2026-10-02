@@ -62,3 +62,10 @@ type ChatResponse struct {
 	Content string
 	Usage   Usage
 }
+
+// StreamChunk 流式响应的单个增量块。
+type StreamChunk struct {
+	Delta string // 本块增量文本
+	Usage *Usage // 仅末块携带（渠道支持时），其余块为 nil
+	Err   error  // 非 nil 表示流中途断开，是最后一个块；已开始吐字的断流不重试不降级
+}

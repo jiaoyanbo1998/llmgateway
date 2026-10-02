@@ -102,3 +102,58 @@ func (g *Gateway) Chat(ctx context.Context, alias string, req capability.ChatReq
 	}
 	return resp, nil
 }
+
+// ChatStream 流式对话。
+// 吐字前的失败直接返回 error（走治理流程）；吐字后的断流通过
+// StreamChunk.Err 传递，不重试不降级。调用方应消费完整个 channel。
+func (g *Gateway) ChatStream(ctx context.Context, alias string, req capability.ChatRequest) (<-chan capability.StreamChunk, error) {
+	cands, err := g.candidates(alias)
+	if err != nil {
+		return nil, err
+	}
+	c := cands[0]
+
+	_, timeout := g.timeoutOf(alias)
+	ctx, cancel := context.WithTimeout(ctx, timeout.Std())
+
+	var stream <-chan capability.StreamChunk
+	endpoint := func(ctx context.Context) error {
+		s, err := c.provider.ChatStream(ctx, c.model, req)
+		if err != nil {
+			if te := TimeoutError(c.provider.Name(), c.model, err); te != nil {
+				return te
+			}
+			return err
+		}
+		stream = s
+		return nil
+	}
+	if err := g.chain.Wrap(endpoint)(ctx); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	// 转发流并在结束时 cancel，释放超时资源；
+	// 调用方放弃消费时 ctx 超时/取消会终止转发，goroutine 不泄漏。
+	out := make(chan capability.StreamChunk, 16)
+	go func() {
+		defer cancel()
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-stream:
+				if !ok {
+					return
+				}
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
